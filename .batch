@@ -1,0 +1,9 @@
+tools\sharpmake\tmp\bin\release\net472\Sharpmake.Application.exe /sources(@"madX.sharpmake.cs")
+tools\sharpmake\Sharpmake.Application\bin\Release\net6.0\Sharpmake.Application.exe /sources(@'madX.sharpmake.cs')
+
+bootstrap.bat Sharpmake.Main.sharpmake.cs Release net472
+
+hctstart.cmd d:\_madX\external\xcompiler d:\_madX\external\xcompiler\build
+hctbuild -s -x64 -vs2022 -no-dxilconv
+
+D:\___madX\tools\sharpmake\Sharpmake.Generators\VisualStudio\Vcxproj.cs

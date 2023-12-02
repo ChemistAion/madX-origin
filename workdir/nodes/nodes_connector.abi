@@ -1,0 +1,83 @@
+{
+	"NodeConnectorFlag" :
+	[	
+		"_modified",
+		"_warning",
+		"_error",	
+		"_disabled",
+		"_locked",
+		
+		"_input",
+		"_output",
+		
+		"_inherit",	
+		"_flag0",
+		"_flag1",
+		"_flag2",
+		"_flag3"		
+	],
+	
+	"NodeConnectorValueType" :
+	[
+		"bool",
+		"int8",
+		"int16",
+		"int32",
+		"int64",		
+		"uint8",
+		"uint16",
+		"uint32",
+		"uint64",
+		"fp8",
+		"fp16",
+		"fp32",
+		"fp64",
+		"fp128",
+		"fp256",
+		"___reserved27",
+		"___reserved28",
+		"___reserved29",
+		"regex",
+		"string"
+	],
+
+	"NodeConnectorType" :
+	[
+		"___reserved32",
+		"___reserved33",
+		"___reserved34",
+		"___reserved35",
+		"scalar",	
+		"vec2",
+		"vec3",
+		"vec4",	
+		"matrix2",
+		"matrix3",
+		"matrix4",
+		"___reserved43",
+		"___reserved44",
+		"___reserved45",
+		"___reserved46",
+		"___reserved47",
+		"___reserved48",
+		"___reserved49",
+		"___reserved50",
+		"___reserved51",
+		"___reserved52",
+		"___reserved53",
+		"___reserved54",
+		"___reserved55",
+		"___reserved56",
+		"___reserved57",
+		"___reserved58",
+		"___reserved59"		
+	],
+	
+	"NodeConnectorTypeMark" :
+	[
+		"_mark0",
+		"_mark1",
+		"_mark2",
+		"_mark3"
+	]	
+}

@@ -1,0 +1,42 @@
+{
+	"NodeFlag" :
+	[	
+		"_modified",		
+		"_warning",
+		"_error",	
+		"_disabled",	
+		"_locked",
+		
+		"_flag0",
+		"_flag1",
+		"_fla12"
+	],
+	
+	"NodeType" :
+	[	
+		"Animation",
+		"Camera",
+		"Cloner",
+		"Deformer",
+		"Field",		
+		"Generator",
+		"Geometry",	
+		"Light",
+		"Logic",
+		"Material",
+		"Math",
+		"Nodes",
+		"Modifier",
+		"Particle",
+		"Physics",
+		"PostFX",
+		"Procedural",
+		"RayTracing",
+		"Root",
+		"Script",
+		"Shading",
+		"Sound",
+		"Text",
+		"Video"
+	]
+}

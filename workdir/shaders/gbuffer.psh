@@ -1,0 +1,54 @@
+#define GBufferRS \
+	"DescriptorTable(SRV(t0), SRV(t1), SRV(t2), visibility = SHADER_VISIBILITY_PIXEL),"\
+	"StaticSampler(s0, visibility = SHADER_VISIBILITY_PIXEL),"\
+	"StaticSampler(s1, filter = FILTER_MIN_MAG_MIP_LINEAR, maxAnisotropy = 1, comparisonFunc = COMPARISON_ALWAYS, visibility = SHADER_VISIBILITY_PIXEL),"\
+	"StaticSampler(s2, filter = FILTER_MIN_MAG_MIP_POINT, maxAnisotropy = 1, comparisonFunc = COMPARISON_ALWAYS, visibility = SHADER_VISIBILITY_PIXEL)"	
+
+struct PSInput
+{ 
+    float4 position_ : SV_POSITION; 
+	float2 tex_ : TEXCOORD0;	
+    float3 normal_ : TEXCOORD1;
+	float3 tangent_ : TEXCOORD2;
+	float3 bitangent_ : TEXCOORD3;
+};
+
+struct PSOutput
+{ 
+    float4 color_ : SV_TARGET0; 
+    float4 normal_ : SV_TARGET1;
+    float4 distortion_ : SV_TARGET2;
+    float4 occlusion_ : SV_TARGET3;
+};
+
+//order comes from gltf
+Texture2D    ColorTex		: register(t0);
+Texture2D    NormalTex		: register(t1);
+Texture2D    DistortionTex	: register(t2);
+//Texture2D    OcclusionTex	: register(t3);
+
+SamplerState 	TexSampler		: register(s0);
+SamplerState	LinearSampler	: register(s1);
+SamplerState	PointSampler	: register(s2);
+
+[RootSignature(GBufferRS)]
+void main(in PSInput PSIn, out PSOutput PSOut)
+{
+	PSOut.color_ = ColorTex.Sample(LinearSampler, PSIn.tex_);
+	PSOut.distortion_ = DistortionTex.Sample(LinearSampler, PSIn.tex_);
+	
+	
+	
+//	float4 encoded_normal = NormalTex.Sample(LinearSampler, PSIn.tex_);
+//	float3x3 tbn = float3x3(PSIn.tangent_, PSIn.bitangent_, PSIn.normal_);
+//	float3 normal = normalize(mul(2.0 * encoded_normal.xyz - 1, tbn));	
+//	PSOut.normal_ = float4(0.5 * normal + 0.5, 0.);
+	
+//	PSOut.occlusion_ = float4(0.5 * encoded_normal.xyz + 0.5, 0.); //OcclusionTex.Sample(LinearSampler, PSIn.tex_);
+
+
+	float4 normal = NormalTex.Sample(LinearSampler, PSIn.tex_);
+	PSOut.normal_ = float4(0.5 * normal.xyz + 0.5, 0.);
+
+	PSOut.occlusion_ = 0.0;
+}

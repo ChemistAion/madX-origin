@@ -1,0 +1,996 @@
+#define DeferredRS \
+	"RootFlags(ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT),"\
+	"CBV(b0, flags = DATA_STATIC, visibility = SHADER_VISIBILITY_ALL),"\
+	"DescriptorTable(SRV(t0), SRV(t1), SRV(t2), SRV(t3), SRV(t4), visibility = SHADER_VISIBILITY_PIXEL),"\
+	"DescriptorTable(SRV(t5), visibility = SHADER_VISIBILITY_PIXEL),"\
+	"StaticSampler(s0, filter = FILTER_MIN_MAG_MIP_LINEAR, maxAnisotropy = 1, comparisonFunc = COMPARISON_ALWAYS, visibility = SHADER_VISIBILITY_PIXEL),"\
+	"StaticSampler(s1, filter = FILTER_MIN_MAG_MIP_POINT, maxAnisotropy = 1, comparisonFunc = COMPARISON_ALWAYS, visibility = SHADER_VISIBILITY_PIXEL),"\
+	"StaticSampler(s2, filter = FILTER_ANISOTROPIC, maxAnisotropy = 16, comparisonFunc = COMPARISON_LESS_EQUAL, visibility = SHADER_VISIBILITY_PIXEL)"
+
+////////////////////////////////////////////////////////////////////////////////
+
+#define xPI 3.1415926535897932
+	
+cbuffer Constants : register(b0)
+{
+	float4 perspective_;
+	float4 direction_;
+	float4x4 inv_vp_;
+};
+
+Texture2D	DepthTex		: register(t0);
+Texture2D	ColorTex		: register(t1);
+Texture2D	DistortionTex	: register(t2);
+Texture2D	NormalTex		: register(t3);
+Texture2D	OcclusionTex	: register(t4);
+Texture2D	HDR         	: register(t5);
+
+
+SamplerState	LinearSampler	: register(s0);
+SamplerState	PointSampler	: register(s1);
+SamplerState	AnisoSampler	: register(s2);
+
+//https://www.shadertoy.com/view/XtGGzG
+float3 viridis_quintic(float x)
+{
+    x = saturate(x);
+    float4 x1 = float4(1.0, x, x * x, x * x * x); // 1 x x2 x3
+    float4 x2 = x1 * x1.w * x; // x4 x5 x6 x7
+    return float3(
+		dot(x1.xyzw, float4(+0.280268003, -0.143510503, +2.225793877, -14.815088879)) + dot(x2.xy, float2(+25.212752309, -11.772589584)),
+		dot(x1.xyzw, float4(-0.002117546, +1.617109353, -1.909305070, +2.701152864)) + dot(x2.xy, float2(-1.685288385, +0.178738871)),
+		dot(x1.xyzw, float4(+0.300805501, +2.614650302, -12.019139090, +28.933559110)) + dot(x2.xy, float2(-33.491294770, +13.762053843)));
+}
+
+float3 I_DitchRiver(const float3 n)
+{
+    // Irradiance from "Ditch River" IBL (http://www.hdrlabs.com/sibl/archive.html)
+    const float3 sh00 = float3(+0.754554516862612, +0.748542953903366, +0.790921515418539);
+    const float3 sh1y = float3(-0.083856548007422, +0.092533500963210, +0.322764661032516) * n.y;
+    const float3 sh1z = float3(+0.308152705331738, +0.366796330467391, +0.466698181299906) * n.z;
+    const float3 sh1x = float3(-0.188884931542396, -0.277402551592231, -0.377844212327557) * n.x;
+	
+    return max(sh00 + sh1y + sh1z + sh1x, 0.);
+}
+
+static const float3 Color_DitchRiver = { 0.65, 0.85, 1.0 };
+
+float2 PrefilteredDFG_Karis(float roughness, float NoV)
+{
+    // Karis 2014, "Physically Based Material on Mobile"
+    const float4 c0 = float4(-1.0, -0.0275, -0.572, +0.022);
+    const float4 c1 = float4(+1.0, +0.0425, +1.040, -0.040);
+
+    float4 r = roughness * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * NoV)) * r.x + r.y;
+
+    return float2(1.04, 1.04) * a004 + r.zw;
+}
+
+//  static const float2 inv_atan = float2(0.1591, 0.3183);
+//  float2 SampleSphericalMap(float3 v)
+//  {
+//      float2 uv = float2(atan(v.x / v.z), asin(v.y));
+//      uv *= inv_atan;
+//      uv += 0.5;
+//      return uv;
+//  }
+
+float2 SampleSphericalMap(float3 v)
+{
+    float2 uv = 0;
+    
+    uv.x = atan2(v.x, v.z) * (1 / (2 * xPI)) + 0.5f;
+    uv.y = 0.5f - asin(v.y) * (1 / xPI);
+
+    return uv;
+}
+
+float2 SampleRadialCoords(float3 v)
+{
+    float lon = atan2(v.z, v.x);
+    float lat = acos(v.y);
+
+    float2 spherical_coords = float2(lon, lat) * (1.0 / xPI);
+
+    return float2(spherical_coords.x * 0.5 + 0.5, 1 - spherical_coords.y);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+static const float3 light_pos_ = { 0.0f, 10.0f, 0.0f };
+static const float3 light_color_ = { 1.0f, 1.0f, 1.0f };
+
+float3 CalcWorldPosFromDepth(float2 UV, float NDC_Depth)
+{
+	const float x = (UV.x * 2 - 1);
+	const float y = -(UV.y * 2 - 1);
+	const float4 ndc = float4(x, y, NDC_Depth, 1.0f);
+
+	float4 wp = mul(inv_vp_, ndc);
+	return (wp / wp.w).xyz;
+}
+
+//	float ConvertDepthToLinear(float NDC_Depth)
+//	{
+//		float l_depth = perspective_.z / (NDC_Depth + perspective_.w);
+//		return l_depth;
+//	}
+//
+//	struct Surface
+//	{
+//		float	l_depth_;
+//		float3	color_;
+//		float3	normal_;
+//	};
+//	
+//	Surface UnpackGBuffer(float2 Pos)
+//	{
+//		Surface surface;
+//	
+//		float depth = DepthTex.Sample(PointSampler, Pos.xy).x;
+//		surface.l_depth_ = ConvertDepthToLinear(depth);
+//	
+//		//surface.color_ = ColorTex.Sample(LinearSampler, Pos.xy).xyz;
+//		//surface.normal_ = NormalTex.Sample(PointSampler, Pos.xy).xyz;
+//		return surface;
+//	}
+
+////////////////////////////////////////////////////////////////////////////////
+
+struct PSInput
+{
+	float2 uv_ : TEXCOORD;
+};
+
+struct PSOutput
+{ 
+    float4 color_ : SV_TARGET0; 
+};
+
+////////////////////////////////////////////////////////////////////////////////
+
+float Sqr(in float x)
+{
+    return x * x;
+}
+
+float LambertDiffuse(float NoL)
+{
+    return NoL / xPI;
+}
+
+float3 F_Schlick(in float3 f0, in float cosTheta)
+{
+    return f0 + (1.0f - f0) * pow((1.0f - cosTheta), 5.0f);
+}
+
+float F_Schlick(float f0, float f90, float cosTheta)
+{
+    return f0 + (f90 - f0) * pow(1.0 - cosTheta, 5.);
+}
+
+float F_Schlick(float angle)
+{
+    float m = saturate(1.0f - angle);
+    float m2 = m * m;
+    return m2 * m2 * m;
+}
+ 
+float Fd_Burley(float linearRoughness, float NoV, float NoL, float LoH)
+{
+    // Burley 2012, "Physically-Based Shading at Disney"
+    float f90 = 0.5 + 2.0 * linearRoughness * LoH * LoH;
+    float lightScatter = F_Schlick(1.0, f90, NoL);
+    float viewScatter = F_Schlick(1.0, f90, NoV);
+    return lightScatter * viewScatter * (1 / xPI);
+}
+
+//////  vec3 F_Fresnel(vec3 clr, float VoH)
+//////  {
+//////      vec3 clrSqrt = sqrt(clamp(vec3(0.0, 0.0, 0.0), vec3(0.99, 0.99, 0.99), clr));
+//////      vec3 n = (1.0 + clrSqrt) / (1.0 - clrSqrt);
+//////      vec3 g = sqrt(n * n + VoH * VoH - 1.0);
+//////      vec3 s = (g - VoH) / (g + VoH);
+//////      vec3 p = ((g + VoH) * VoH - 1.0) / ((g - VoH) * VoH + 1.0);
+//////      return 0.5 * s * s * (1.0 + p * p);
+//////  }
+//////  
+//////  vec3 F_Shlick(in vec3 f0, in vec3 fd90, float VoH)
+//////  {
+//////      return f0 + (fd90 - f0) * pow(1.0 - VoH, 5.0);
+//////  }
+
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+
+// Microfacet Models for Refraction through Rough Surfaces
+// Walter et al. aka Towbridge-Reitz
+// http://www.cs.cornell.edu/~srm/publications/EGSR07-btdf.html
+float D_ggx(in float alpha, in float NdotH)
+{
+    float a2 = alpha * alpha;
+    float cos2 = NdotH * NdotH;
+    return (1.0f / xPI) * Sqr(alpha / (cos2 * (a2 - 1) + 1));
+
+//  float CosSquared = NdotH * NdotH;
+//  float TanSquared = (1.0f - CosSquared) / CosSquared;
+//  return (1.0f / xPI) * Sqr(alpha / (CosSquared * (alpha * alpha + TanSquared)));
+}
+
+float Specular_D_GGX(float roughness, float NoH)
+{
+    const float a2 = roughness * roughness;
+    const float NoH2 = NoH * NoH;
+    return a2 / (xPI * pow((NoH2 * (a2 - 1) + 1), 2));
+}
+
+float D_GGX(float linearRoughness, float NoH)
+{
+    // Walter et al. 2007, "Microfacet Models for Refraction through Rough Surfaces"
+    float oneMinusNoHSquared = 1.0 - NoH * NoH;
+    float a = NoH * linearRoughness;
+    float k = linearRoughness / (oneMinusNoHSquared + a * a);
+    float d = k * k * (1.0 / xPI);
+    return d;
+}
+
+float D_GGXsecond(float alpha, float NoH)
+{
+    float a2 = alpha * alpha;
+    float NdotH2 = NoH * NoH;
+
+    float nom = a2;
+    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+    denom = xPI * denom * denom;
+
+    return nom / denom;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+
+float G_SchlickGGX(float roughness, float NoV)
+{
+    float r = (roughness + 1.0);
+    float k = (r * r) / 8.0;
+
+    float num = NoV;
+    float denom = NoV * (1.0 - k) + k;
+
+    return num / denom;
+}
+
+float G_Smith(float roughness, float NoV, float NoL)
+{
+    float ggx2 = G_SchlickGGX(NoV, roughness);
+    float ggx1 = G_SchlickGGX(NoL, roughness);
+
+    return ggx1 * ggx2;
+}
+
+//G1
+float G_SmithGGXCorrelated(float linearRoughness, float NoV, float NoL)
+{
+    // Heitz 2014, "Understanding the Masking-Shadowing Function in Microfacet-Based BRDFs"
+    float a2 = linearRoughness * linearRoughness;
+    float GGXV = NoL * sqrt((NoV - a2 * NoV) * NoV + a2);
+    float GGXL = NoV * sqrt((NoL - a2 * NoL) * NoL + a2);
+    return 0.5 / (GGXV + GGXL);
+}
+
+//G2
+float G_smith_ggx(in float a, in float NdotV, in float NdotL)
+{
+    // Smith GGX with denominator
+    // http://graphicrants.blogspot.co.uk/2013/08/specular-brdf-reference.html
+    float a2 = a * a;
+    float G_V = NdotV + sqrt((NdotV - NdotV * a2) * NdotV + a2);
+    float G_L = NdotL + sqrt((NdotL - NdotL * a2) * NdotL + a2);
+    return rcp(G_V * G_L);
+}
+
+//G3
+float G_UE4(in float alpha, in float NdotV)
+{
+    // Schlick GGX
+    // http://graphicrants.blogspot.co.uk/2013/08/specular-brdf-reference.html
+    float k = alpha * 0.5;
+    return NdotV / (NdotV * (1 - k) + k);
+}
+
+float G_implicit(in float NdotV, in float NdotL)
+{
+    return NdotL * NdotV;
+}
+ 
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+
+//https://learnopengl.com/PBR/Theory
+//http://www.codinglabs.net/article_physically_based_rendering.aspx
+//https://www.shadertoy.com/view/XtdXzl
+//mapping opengl to hlsl
+//https://anteru.net/blog/2016/mapping-between-HLSL-and-GLSL/
+
+[RootSignature(DeferredRS)]
+void main(in PSInput PSIn, out PSOutput PSOut)
+{
+    const float depth = DepthTex.Sample(PointSampler, PSIn.uv_).x;
+    const float3 albedo = ColorTex.Sample(LinearSampler, PSIn.uv_).xyz;
+    const float3 normal = NormalTex.Sample(LinearSampler, PSIn.uv_).xyz;
+	const float3 distortion = DistortionTex.Sample(LinearSampler, PSIn.uv_).xyz;
+	const float3 occlusion = OcclusionTex.Sample(LinearSampler, PSIn.uv_).xyz;
+    
+    const float3 position = CalcWorldPosFromDepth(PSIn.uv_, depth);
+    
+    float2 spherical_uv = SampleSphericalMap(normalize(float3(-position.z, position.y, -position.x)));  
+    const float3 hdr = HDR.Sample(LinearSampler, spherical_uv).xyz;
+    
+    float3 dummy = (albedo + normal + distortion + occlusion + position + hdr) * 0.0000001;
+    
+    ////////////////////////////////////////////////////////////////////////////////
+
+    const float roughness = distortion.y;
+    const float metalness = distortion.z;
+    
+    const float alpha = roughness * roughness;  
+	
+    float3 N = normalize(2 * normal - 1);
+    //float3 N_rh = float3(N.xy, -N.z);
+
+    float3 V = normalize(-position); //normalize(-direction_.xyz);
+    float3 L = normalize(light_pos_);
+    float3 H = normalize(L + V);
+    
+    //float3 V_rh = float3(V.xy, -V.z);
+    //float3 L_rh = float3(L.xy, -L.z);
+    
+    //const float NoV = abs(dot(N, V)) + 0.0001f;
+    const float NoV = saturate(dot(N, V));
+    const float NoL = saturate(dot(N, L));
+    const float NoH = saturate(dot(N, H));
+    
+    //const float NoV_rh = saturate(dot(N_rh, V_rh));
+    //const float NoL_rh = saturate(dot(N_rh, L_rh));
+
+    //const float LoH = saturate(dot(L, H));
+    //const float LoV = saturate(dot(L, V));
+    const float VoH = saturate(dot(V, H));
+
+    ////////////////////////////////////////////////////////////////////////////////
+
+    //const float3 diffuse_color = albedo * (1. - Sqr(metalness));
+    const float3 diffuse_color = albedo * (1. - metalness);
+    
+    float n = 1.5;
+    float f0 = pow((1 - n) / (1 + n), 2);
+
+    const float3 f0_color = lerp(0.04f, albedo, metalness);
+
+    const float2 dfg = PrefilteredDFG_Karis(roughness, 1 - NoV);
+    const float3 specular_color = f0_color * dfg.x + dfg.y;
+
+    float fd1 = Fd_Burley(roughness, NoV, NoL, VoH);
+    float fd2 = F_Schlick(f0, 1.0, NoL);
+
+    float3 Rd = albedo / xPI * (1.0f - fd1);
+
+    ////////////////////////////////////////////////////////////////////////////////
+    
+    float3 term = Rd;
+
+    //float3 term = viridis_quintic(NoL);
+    //float3 term = diffuse_color + specular_color;
+
+//    float3 term = albedo * fd1;
+//  const float split = (PSIn.uv_.x * 8) + PSIn.uv_.y;
+//  
+//  if (split < 10) //right
+//  term = viridis_quintic(fd1);
+//  
+//  if (split < 7)
+//  term = viridis_quintic(fd2);
+//  
+//  if (split < 3) //left
+//  term = viridis_quintic(fd1);
+
+    ////////////////////////////////////////////////////////////////////////////////
+
+    float3 color = max(term + dummy, 0.0f);
+    
+//  color = color / (color + 1);
+//  color = pow(color, (1.0 / 2.2));
+    
+    //PSOut.color_ = float4(pow(color, (1.0 / 2.2)), 1.0f);
+    PSOut.color_ = float4(color, 1.0f);
+}
+
+
+//const float3 specularColor = float3(1.00, 0.71, 0.29);
+
+////        ////////////////////////////////////////////////////////////////////////////////
+////        
+////        //  const float3 diffuseColor = (1.0 - metalness) * albedo;
+////        //  const float3 f0Color = lerp(0.04f, albedo, metalness);
+////        //  
+////        //  const float2 dfg = PrefilteredDFG_Karis(roughness, 1-NoV);
+////        //  const float3 specularColor = f0Color * dfg.x + dfg.y;
+////        //  
+////        //  float3 indirectSpecular = Color_DitchRiver;
+////        //  float3 indirectDiffuse = I_DitchRiver(N) * (1 / xPI);
+////        //     
+////        //  float3 ibl = diffuseColor * indirectDiffuse + specularColor * indirectSpecular;
+////        
+////        ////////////////////////////////////////////////////////////////////////////////
+////        
+////        //////  const float LoV = saturate(dot(L, V));
+////        //const float VoH = saturate(dot(V, H));       
+////        //const float LoH = saturate(dot(L, H));
+////        
+////        //  //////
+////        //  float FL = FresnelSchlick(NoL);
+////        //  float FV = FresnelSchlick(NoV);
+////        //  float Fd90 = 0.5 + 2.0f * LoH * LoH * roughness;
+////        //  float Fd = lerp(Fd90, 1, FL) * lerp(Fd90, 1, FV); ////// * (1 / xPI);
+////        
+////        //////
+////        //float Fd = Fd_Burley(roughness, NoV, NoL, VoH);
+////        //  
+////        //float3 diff = Fd * diffuseColor * occlusion;
+////        
+////        ////////////////////////////////////////////////////////////////////////////////
+////        
+////        /////// D1 == D2 == D3 == D4
+////        //float D1 = D_ggx(roughness, NoH);
+////        //float D2 = Specular_D_GGX(roughness, NoH);
+////        //float D3 = D_GGX(roughness, NoH);
+////        //float D4 = D_GGXsecond(roughness, NoH);
+////        float D = D_ggx(alpha, NoH);
+////        
+////        
+////        
+////        /////// G1 == G2 diff
+////        /////// G1 ~~ G4 (G4 spec?) 
+////        /////// G3 ~~ G5 (more Ns) 
+////        float G1 = 1 - G_SmithGGXCorrelated(roughness, NoV, NoL);
+////        //float G2 = 1 - G_smith_ggx(roughness, NoV, NoL);
+////        //float G3 = G_UE4(roughness, NoV);
+////        //float G4 = G_implicit(NoV, NoL);
+////        //
+////        //float geo_numerator = 2.0f;// * NoH;
+////        //float geo_denominator = saturate(dot(V, H));
+////        //float geo_b = (geo_numerator * NoV) / geo_denominator;
+////        //float geo_c = (geo_numerator * NoL) / geo_denominator;
+////        //float G5 = min(1.0f, min(geo_b, geo_c));
+////        
+////        //float G6 = 1 - G_Smith(roughness, NoV, NoL); //seems diffuse
+////        
+////        
+////        
+////        //float FL = F_Schlick(NoL);
+////        //float FV = F_Schlick(NoV);
+////        //float Fd90 = 0.5 + 2.0f * LoH * LoH * roughness;
+////        //float Fd2 = lerp(1, Fd90, FL) * lerp(1, Fd90, FV) * (1 / xPI);
+////        
+////        
+////        
+////        //float numerator1 = (Fd * D * G1);
+////        //float numerator3 = (Fd * D * G3);
+////        //float numerator5 = (Fd * D * G5);
+////        
+////        ////float denominator = (NoL * NoV);
+////        float denominator = 4 * (NoV * NoL) + 0.0001;
+////        
+////        //float spec1 = numerator1 / denominator;
+////        //float spec3 = numerator3 / denominator;
+////        //float spec5 = numerator5 / denominator;
+////        //float spec = (Fd * D * G1) / denominator;
+////        
+////        ////////////////////////////////////////////////////////////////////////////////    
+
+
+
+
+
+
+
+//////  ////////////////////////////////////////////////////////////////////////////////
+//////  
+//////  //  const float grid = 9;
+//////  //  const float width = 3;
+//////  //  
+//////  //  const float3 grid_pos = position * grid;
+//////  //  
+//////  //  const float3 fw = fwidth(grid_pos);
+//////  //  half3 bc = saturate(width - abs(1 - 2 * frac(grid_pos)) / fw);
+//////  //  
+//////  //  const half3 f1 = smoothstep(1 / grid, 2 / grid, fw);
+//////  //  const half3 f2 = smoothstep(2 / grid, 4 / grid, fw);
+//////  //  
+//////  //  bc = lerp(lerp(bc, 0.5, f1), 0, f2);
+//////  
+//////  ////////////////////////////////////////////////////////////////////////////////
+
+
+
+
+
+
+
+
+
+
+//////  const float LoH = saturate(dot(L, H));
+//////  const float LoV = saturate(dot(L, V));
+//////  const float VoH = saturate(dot(V, H));
+//////  
+//////  float D = Specular_D_GGX(roughness, NoH); //OK with saturate(dot(N, H));
+//////  
+//////  float G1 = Specular_G_GGX(roughness, NoV);
+//////  float G2 = Specular_G_GGX(roughness, NoL);
+//////  float G = saturate(G1 * G2);
+//////  
+//////  /const float3 spec = saturate(albedo * BRDF) * float3(1.00, 0.71, 0.29);;
+//////  /const float3 spec = BRDF * (specularColor / xPI);
+//////  
+//////  /const float3 diff = saturate(invPI * Diffuse_Disney(NoV, NoL, LoH, roughness)) * diffuseColor;
+//////  loat FL = FresnelSchlick(NoL);
+//////  loat FV = FresnelSchlick(NoV);
+//////  onst float Fd90 = 0.5 + 2.0f * roughness * LoH * LoH;
+//////  loat Fd = lerp(1, Fd90, FL) * lerp(1, Fd90, FV); 
+//////  onst float3 diff = (1 / xPI) * diffuseColor * Fd;
+//////  
+//////  const float numeratorBRDF = D * G;
+//////  //const float denominatorBRDF = max((4.0f * max(NoV, 0.0f) * max(NoL, 0.0f)), 0.001f);
+//////  const float denominatorBRDF = saturate(4.0f * NoV * NoL);
+//////  const float BRDF = saturate(numeratorBRDF / denominatorBRDF) + 0.0001f;
+//////  
+//////  float tt0 = Fd;
+//////  float tt1 = spec.x * 0.0000001;
+//////  float tt2 = diff.x * 0.0000001;
+//////  
+//////  float3 DIFF = diff; //numeratorBRDF;
+//////  float3 SPEC = spec;
+//////  
+//////  float3 color = max(DIFF + SPEC + (bc * 0.01), 0.0f);
+//////  //color = pow(color, 1 / 2.2);
+//////  PSOut.color_ = float4(color, 1.0f);
+//////  
+//////  float color = max(tt0 + tt1 + tt2, 0);
+//////  PSOut.color_ = float4(viridis_quintic(color) + (bc), 1.0f);
+//////  //PSOut.color_ = float4(diff + (bc * 0.0001), 1.0f);
+
+
+
+//////  
+//////  float F = F_schlick(f0, LdotH); //only z+ renders
+//////  //float F = FresnelSchlickTerm(LdotH);
+//////  
+//////  //float geo_numerator = 2.0f * NdotH;
+//////  //float geo_denominator = VdotH;
+//////  //float geo_b = (geo_numerator * NdotV) / geo_denominator;
+//////  //float geo_c = (geo_numerator * NdotL) / geo_denominator;
+//////  //float G = min(1.0f, min(geo_b, geo_c));
+//////  float G = G_smith_ggx(roughness, NdotV, NdotL);
+//////  //float G = G_UE4(alpha, NdotV); // not works
+//////  //float G = min(1, G_implicit(NdotV, NdotL) * 100);
+//////  
+//////  
+//////  float spec = (D * G) / (4 * NdotL * NdotV);
+//////  float3 Rs = (float3(1.00, 0.71, 0.29) / xPI) * spec;
+//////  
+//////  //float FL = FresnelSchlickTerm(NdotL);
+//////  //float FV = FresnelSchlickTerm(NdotV);
+//////  //float Fd90 = 0.5 + 2.0f * LdotH * LdotH * roughness;
+//////  //float Fd = lerp(1, Fd90, FL) * lerp(1, Fd90, FV);
+
+
+
+//  float Sqr(in float x)
+//  {
+//      return x * x;
+//  }
+//  
+//  // Fresnel term - Schlick approximation
+//  float F_schlick(in float f0, in float u)
+//  {
+//      return (f0 + (1.0f - f0) * pow((1.0f - u), 5.0f));
+//  }
+//  
+//  float FresnelSchlick(float u)
+//  {
+//      float m = saturate(1.0f - u);
+//      float m2 = m * m;
+//      return m2 * m2 * m;
+//  }
+//  
+//  // Smith GGX with denominator
+//  // http://graphicrants.blogspot.co.uk/2013/08/specular-brdf-reference.html
+//  float G_smith_ggx(in float a, in float NdotV, in float NdotL)
+//  {
+//      float a2 = a * a;
+//      float G_V = NdotV + sqrt((NdotV - NdotV * a2) * NdotV + a2);
+//      float G_L = NdotL + sqrt((NdotL - NdotL * a2) * NdotL + a2);
+//      return rcp(G_V * G_L);
+//  }
+//  
+//  // Schlick GGX
+//  // http://graphicrants.blogspot.co.uk/2013/08/specular-brdf-reference.html
+//  float G_UE4(in float alpha, in float NdotV)
+//  {
+//      float k = alpha * 0.5;
+//      return NdotV / (NdotV * (1 - k) + k);
+//  }
+//  
+//  float G_implicit(in float NdotV, in float NdotL)
+//  {
+//      return NdotL * NdotV;
+//  }
+//  
+//  // Microfacet Models for Refraction through Rough Surfaces
+//  // Walter et al. aka Towbridge-Reitz
+//  // http://www.cs.cornell.edu/~srm/publications/EGSR07-btdf.html
+//  float D_ggx(in float alpha, in float NdotH)
+//  {
+//      float a2 = alpha * alpha;
+//      float cos2 = NdotH * NdotH;
+//      return (1.0f / xPI) * Sqr(alpha / (cos2 * (a2 - 1) + 1));
+//  
+//  //  float CosSquared = NdotH * NdotH;
+//  //  float TanSquared = (1.0f - CosSquared) / CosSquared;
+//  //  return (1.0f / xPI) * Sqr(alpha / (CosSquared * (alpha * alpha + TanSquared)));
+//  }
+//  
+//  float Specular_D_GGX(float roughness, float NoH)
+//  {
+//      const float a2 = roughness * roughness;
+//      const float NoH2 = NoH * NoH;
+//      return a2 / (xPI * pow((NoH2 * (a2 - 1) + 1), 2));
+//  }
+//  
+//  float Specular_G_GGX(float roughness, float NoV)
+//  {
+//      const float a2 = roughness * roughness;
+//      const float NoV2 = NoV * NoV;
+//      return (2.0f * NoV) / (NoV + sqrt(a2 + (1 - a2) * NoV2));
+//  }
+//  
+//  float Specular_F_CT(float f0, float VoH)
+//  {
+//      const float f0Sqrt = sqrt(f0);
+//      const float eta = (1.0f + f0Sqrt) / (1.0f - f0Sqrt);
+//      const float g = sqrt(eta * eta + VoH * VoH - 1.0f);
+//      const float c = VoH;
+//  
+//      return 0.5f * pow((g - c) / (g + c), 2) * pow((1 + ((g + c) * c - 1) / ((g - c) * c + 1)), 2);
+//  }
+//  
+//  //Disney diffuse function - modified by Frostbite
+//  //https://seblagarde.files.wordpress.com/2015/07/course_notes_moving_frostbite_to_pbr_v32.pdf#page=11&amp;zoom=auto,-265,590
+//  float Diffuse_Disney(float NoV, float NoL, float LoH, float roughness)
+//  {
+//      float energyBias = lerp(0, 0.5, roughness);
+//      float energyFactor = lerp(1.0, 1.0 / 1.51, roughness);
+//      float fd90 = energyBias + 2.0 * LoH * LoH * roughness;
+//      float f0 = 1.0f;
+//      float lightScatter = Specular_F_Schlick(f0, fd90, NoL);
+//      float viewScatter = Specular_F_Schlick(f0, fd90, NoV);
+//      return lightScatter * viewScatter * energyFactor;
+//  }
+
+
+
+
+
+
+
+
+
+
+
+
+
+//  ////////////////////////////////////////////////////////////////////////////////
+//
+//  const float3 f0_color = lerp(0.04f, albedo, metalness);
+//
+//  //const float light_distance = length(light_pos_);
+//  //const float light_attenuation = 1.0 / Sqr(light_distance);
+//  //const float3 ligth_radiance = light_color_ * light_attenuation;
+//  const float3 radiance = light_color_;
+//
+//  float D = D_ggx(alpha, NoH); //TODO: alpha vs. roughness check
+//
+//
+//
+//  /////// G1 == G2 diff
+//  /////// G1 == G2 ~~ G4 (G4 no normal)
+//  /////// G3 ~~ G5 (dimmed Ns, no backlight)
+//  //float G1 = 1 - G_SmithGGXCorrelated(roughness, NoV, NoL); //RH
+//  //float G2 = 1 - G_smith_ggx(roughness, NoV, NoL); //RH
+//  //float G3 = G_UE4(roughness, NoV); //LH
+//  //float G4 = G_implicit(NoV, NoL); //LH
+//  //
+//  //float geo_numerator = 2.0f;// * NoH;
+//  //float geo_denominator = saturate(dot(V, H));
+//  //float geo_b = (geo_numerator * NoV) / geo_denominator;
+//  //float geo_c = (geo_numerator * NoL) / geo_denominator;
+//  //float G5 = min(1.0f, min(geo_b, geo_c)); //LH
+//  //
+//  //float G6 = 1 - G_Smith(roughness, NoV, NoL); //RH
+//  //float G6_rh = G_Smith(roughness, NoV_rh, NoL_rh); //RH
+//  //float G = 1 - G_SmithGGXCorrelated(alpha, NoV, NoL); //RH
+//  float G = 1 - G_Smith(roughness, NoV, NoL); //RH
+//
+//
+//  float3 F = F_Schlick(f0_color, NoH);
+//
+//
+//  const float3 kD = lerp(0, 1 - F, 1 - metalness);
+//
+//
+//  //float3 numerator = D * G * F;
+//  //float denominator = 4.0 * NoL * NoV + 0.0001;
+//  //float3 specular = numerator / denominator;
+//
+//  //float3 specular1 = D * G1 * F;
+//  //float3 specular3 = D * G3 * F;
+//  //float3 specular6 = D * G6 * F;
+//  float3 specular = D * G * F;
+//
+//
+//  //float3 Lo1 = (kD * albedo  + specular1) * radiance * NoL;
+//  //float3 Lo3 = (kD * albedo  + specular3) * radiance * NoL;
+//  //float3 Lo6 = (kD * albedo  + specular6) * radiance * NoL;
+//
+//  float3 Lo = (kD * albedo + specular) * radiance * NoL;
+//
+//
+//  ////// float3 ambient = 0.03 * albedo * occlusion;
+//
+//  ////////////////////////////////////////////////////////////////////////////////
+
+
+
+
+
+
+
+
+
+
+
+
+
+//           ////////////////////////////////////////////////////////////////////////////////
+//
+//           const float3 diffuse_color = albedo; // *(1. - Sqr(metalness));
+//           const float3 specular_color = lerp(0.04f, albedo, metalness);
+//
+//           //max_f0 == f0_color
+//           const float max_f0 = max(specular_color.x, max(specular_color.y, specular_color.z));
+//           const float3 f0_color = lerp(0.04f, albedo, metalness);
+//
+//           float3 F = FRESNEL_SHLICK ? F_Shlick(max_f0, 1.0, NoV) : F_Fresnel(max_f0, NoV);
+//
+//           float3 vr = reflect(-V, N);
+//
+//           //  const float3 diffuse = SampleDiffuseEnvironment(N); //*diffuse_color; //*LambertDiffuse(NoL);
+//           const float3 specular = F * specular_color * SampleReflectedEnvironment(vr, alpha, max_f0); //+ MicrofacetSpecular(alpha, NoH, NoV, NoL);
+//
+//           ////////////////////////////////////////////////////////////////////////////////
+//
+//           //    float3 term = I_DitchRiver(-N);
+//
+//           //    float3 diffuse = I_DitchRiver(-float3(N.x, N.y, -N.z));
+//
+//           //    float3 term = F; //diffuse* occlusion* diffuse_color;
+//
+//           //  const float split = (PSIn.uv_.x * 12) + PSIn.uv_.y;
+//           //  const float modulo = fmod(split, 2);
+//           //
+//           //  if (modulo < 1)
+//           //      diffuse = SampleDiffuseEnvironment(-N) * xPI;
+//           //
+//           //
+//           //  float3 term = depth > 0
+//           //      ? diffuse * occlusion * diffuse_color
+//           //      : hdr;
+//
+//
+//           //  float3 term;
+//           //  const float split = (PSIn.uv_.x * 8) + PSIn.uv_.y;
+//           //
+//           //  if (split < 10) //right
+//           //  term = F_Shlick(max_f0, 1.0, NoV);
+//           //
+//           //  if (split < 7)
+//           //  term = F_Fresnel(max_f0, NoV);;
+//           //
+//           //  if (split < 3) //left
+//           //  term = F_Shlick(max_f0, 1.0, NoV);
+//
+//
+//           //  float3 term = I_DitchRiver(-N);
+//           //
+//           //  const float split = (PSIn.uv_.x * 8) + PSIn.uv_.y;
+//           //  const float modulo = fmod(split, 2);
+//           //
+//           //  if (modulo < 1)
+//           //      term = SampleDiffuseEnvironment(N);
+//           //  else
+//           //      term = albedo * (1. - Sqr(metalness));
+//
+//
+//           ////////////////////////////////////////////////////////////////////////////////
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+
+//  #define MAX_CUBEMAP_SAMPLES 100
+//  
+//  #define HEIGHT_CORRELATED_SMITH true
+//  #define FRESNEL_SHLICK false
+//  
+//  float D_GGX(float r4, float NoH)
+//  {
+//      float d = NoH * NoH * (r4 - 1.0) + 1.0;
+//      return r4 / (d * d);
+//  }
+//  
+//  float G_Smith(in float NoV, in float NoL, in float r4)
+//  {
+//      float Vis_SmithV = NoV + sqrt(NoV * (NoV - NoV * r4) + r4);
+//      float Vis_SmithL = NoL + sqrt(NoL * (NoL - NoL * r4) + r4);
+//      return 1.0 / (Vis_SmithV * Vis_SmithL);
+//  }
+//  
+//  float G_SmithJointApprox(float NoV, float NoL, in float r2)
+//  {
+//      float Vis_SmithV = NoL * (NoV * (1.0 - r2) + r2);
+//      float Vis_SmithL = NoV * (NoL * (1.0 - r2) + r2);
+//      return 0.5 / (Vis_SmithV + Vis_SmithL);
+//  }
+//  
+//  float3 F_Fresnel(float3 clr, float VoH)
+//  {
+//      float3 clrSqrt = sqrt(clamp(float3(0.0, 0.0, 0.0), float3(0.99, 0.99, 0.99), clr));
+//      float3 n = (1.0 + clrSqrt) / (1.0 - clrSqrt);
+//      float3 g = sqrt(n * n + VoH * VoH - 1.0);
+//      float3 s = (g - VoH) / (g + VoH);
+//      float3 p = ((g + VoH) * VoH - 1.0) / ((g - VoH) * VoH + 1.0);
+//      return 0.5 * s * s * (1.0 + p * p);
+//  }
+//  
+//  float3 F_Shlick(float3 f0, float3 fd90, float VoH)
+//  {
+//      return f0 + (fd90 - f0) * pow(1.0 - VoH, 5.0);
+//  }
+//  
+//  float3 PerpendicularVector(float3 nrm)
+//  {
+//      float3 componentsLength = nrm * nrm;
+//  
+//      if (componentsLength.x > 0.5)
+//      {
+//  	    float scaleFactor = sqrt(componentsLength.z + componentsLength.x);
+//  	    return nrm.zyx * float3(1.0 / scaleFactor, 0.0, -1.0 / scaleFactor);
+//      }
+//      else if (componentsLength.y > 0.5)
+//      {
+//  	    float scaleFactor = sqrt(componentsLength.y + componentsLength.x);
+//  	    return nrm.yxz * float3(-1.0 / scaleFactor, 1.0 / scaleFactor, 0.0);
+//      }
+//  
+//      float scaleFactor = sqrt(componentsLength.z + componentsLength.y);
+//      return nrm.xzy * float3(0.0, -1.0 / scaleFactor, 1.0 / scaleFactor);
+//  }
+//  
+//  float RandomFloat(float3 co)
+//  {
+//      return frac(sin(dot(co, float3(12.9898, 78.233, 59.5789))) * 43758.5453);
+//  }
+//  
+//  float3 RandomDirection(float3 base, float3 u, float3 v, float r2, float3 seed)
+//  {
+//      float phi = 2.0 * xPI * RandomFloat(seed);
+//      float Xi = RandomFloat(seed * phi + phi);
+//  
+//      float cosTheta = sqrt((1.0 - Xi) / ((r2 - 1.0) * Xi + 1.0));
+//      float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+//  
+//      return normalize((u * cos(phi) + v * sin(phi)) * sinTheta + base * cosTheta);
+//  }
+//  
+//  float3 SampleDiffuseEnvironment(float3 Wi)
+//  {
+//      float samples = 0.0;
+//  
+//      float3 u = PerpendicularVector(Wi);
+//      float3 v = cross(u, Wi);
+//      float3 result = 0.0;
+//      float3 Wo = Wi;
+//  
+//      for (int i = 0; i < MAX_CUBEMAP_SAMPLES; ++i)
+//      {
+//          Wo = RandomDirection(Wi, u, v, 1.0, Wo + result);
+//          float weight = dot(Wi, Wo);
+//      
+//          //result += weight * texture(iChannel0, Wo).xyz;
+//          float2 spherical_uv = SampleSphericalMap(normalize(float3(Wo.z, Wo.y, Wo.x)));  
+//          float3 hdr = HDR.Sample(LinearSampler, spherical_uv).xyz;
+//          result += weight * hdr;
+//  
+//          samples += weight;
+//      }    
+//      return result / samples; //*float(1.0 / MAX_CUBEMAP_SAMPLES);
+//  }
+//  
+//  float MicrofacetWeight(float r2, float f0, float NoH, float NoV, float NoL)
+//  {
+//      float r4 = r2 * r2;
+//      float D = D_GGX(r4, NoH);
+//      float G = HEIGHT_CORRELATED_SMITH ? G_SmithJointApprox(NoV, NoL, r2) : G_Smith(NoV, NoL, r4);
+//      float3 F = FRESNEL_SHLICK ? F_Shlick(f0, 1.0, NoV) : F_Fresnel(f0, NoV);
+//  
+//      return (F.x * D * G) * (NoL / xPI);
+//  }
+//  
+//  float3 SampleReflectedEnvironment(float3 Wi, float r, float f0)
+//  {
+//      float r2 = r * r;
+//      float samples = 0.0;
+//      float3 u = PerpendicularVector(Wi);
+//      float3 v = cross(u, Wi);
+//      float3 result = 0.0;
+//      float3 Wo = Wi;
+//  
+//      for (int i = 0; i < MAX_CUBEMAP_SAMPLES; ++i)
+//      {
+//          Wo = RandomDirection(Wi, u, v, r2, Wo + result);
+//          float3 H = normalize(Wi + Wo);
+//          float weight = MicrofacetWeight(r2, f0, dot(H, Wi), 1.0, dot(Wo, Wi));
+//      
+//          //result += weight * texture(iChannel0, Wo).xyz;
+//          float2 spherical_uv = SampleSphericalMap(normalize(float3(Wo.x, Wo.y, Wo.z)));
+//          //float2 spherical_uv = SampleRadialCoords(normalize(float3(Wo.x, Wo.y, Wo.z)));
+//          result += weight * HDR.Sample(LinearSampler, spherical_uv).xyz;
+//  
+//          samples += weight;
+//      }    
+//      return (result / samples);
+//  }
+//  
+//  float MicrofacetSpecular(float r2, float NoH, float NoV, float NoL)
+//  {  
+//      float r4 = r2 * r2;   
+//      float D = D_GGX(r4, NoH); 
+//      float G = HEIGHT_CORRELATED_SMITH ? G_SmithJointApprox(NoV, NoL, r2) : G_Smith(NoV, NoL, r4);
+//      
+//      return D * G * (NoL / xPI);
+//  }

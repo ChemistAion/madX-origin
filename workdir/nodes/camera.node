@@ -1,0 +1,98 @@
+{
+	"Camera" :
+	[	
+		{
+			"_name" : "Camera",
+			"_group" : [],
+			"Transform" :
+			[
+				"Position X",
+				"Position Y",
+				"Position Z",
+				"Rotation X",
+				"Rotation Y",
+				"Rotation Z",
+				"Scale X",
+				"Scale Y",
+				"Scale Z"				
+			],
+			"Attributes" :
+			[
+				"Zoom"
+			]
+		}
+	],
+	
+	"Transform" :
+	[
+		{
+			"_name" : "Position X",
+			"_flag" : "_input",
+			"_value" : "fp32",
+			"_type" : "scalar",
+			"_mark" : ""
+		},
+		{
+			"_name" : "Position Y",
+			"_flag" : "_input",
+			"_value" : "fp32",
+			"_type" : "scalar",
+			"_mark" : ""
+		},
+		{
+			"_name" : "Position Z",
+			"_flag" : "_input",
+			"_value" : "fp32",
+			"_type" : "scalar",
+			"_mark" : ""
+		},
+		{
+			"_name" : "Rotation X",
+			"_flag" : "_input",
+			"_value" : "fp32",
+			"_type" : "scalar",
+			"_mark" : ""
+		},
+		{
+			"_name" : "Rotation Y",
+			"_flag" : "_input",
+			"_value" : "fp32",
+			"_type" : "scalar",
+			"_mark" : ""
+		},
+		{
+			"_name" : "Rotation Z",
+			"_flag" : "_input",
+			"_value" : "fp32",
+			"_type" : "scalar",
+			"_mark" : ""
+		},
+		{
+			"_name" : "Scale X",
+			"_flag" : "_input",
+			"_value" : "fp32",
+			"_type" : "scalar",
+			"_mark" : ""
+		},
+		{
+			"_name" : "Scale Y",
+			"_flag" : "_input",
+			"_value" : "fp32",
+			"_type" : "scalar",
+			"_mark" : ""
+		},
+		{
+			"_name" : "Scale Z",
+			"_flag" : "_input",
+			"_value" : "fp32",
+			"_type" : "scalar",
+			"_mark" : ""
+		}
+	],
+	"Attributes" :
+	[
+		{
+			"_name" : "Zoom"
+		}	
+	]
+}

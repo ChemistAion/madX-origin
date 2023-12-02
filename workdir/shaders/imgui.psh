@@ -1,0 +1,21 @@
+#define PixelRS \
+	"DescriptorTable(SRV(t0), visibility = SHADER_VISIBILITY_PIXEL),"\
+	"StaticSampler(s0, visibility = SHADER_VISIBILITY_PIXEL)"
+
+//	"DescriptorTable(SRV(t0, flags = DESCRIPTORS_VOLATILE | DATA_VOLATILE), visibility = SHADER_VISIBILITY_PIXEL)
+	
+struct PSInput
+{
+    float4 pos : SV_POSITION;
+    float4 col : COLOR;
+    float2 uv  : TEXCOORD;
+};
+
+Texture2D    Texture;// : register(t0);
+SamplerState TextureSampler;// : register(s0);
+
+[RootSignature(PixelRS)]
+float4 main(in PSInput PSIn) : SV_Target
+{
+    return PSIn.col * Texture.Sample(TextureSampler, PSIn.uv);
+}

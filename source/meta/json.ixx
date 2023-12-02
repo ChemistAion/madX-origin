@@ -1,0 +1,1 @@
+export module madX.Meta.JSON;

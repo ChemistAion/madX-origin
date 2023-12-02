@@ -1,0 +1,52 @@
+[submodule "tools/benchmark"]
+	path = tools/benchmark
+	url = https://github.com/google/benchmark.git
+	ignore = dirty
+[submodule "external/xmath"]
+	path = external/xmath
+	url = https://github.com/Microsoft/DirectXMath.git
+	ignore = dirty
+[submodule "tools/googletest"]
+	path = tools/googletest
+	url = https://github.com/google/googletest.git
+	ignore = dirty
+[submodule "external/cista"]
+	path = external/cista
+	url = https://github.com/felixguendling/cista.git
+	ignore = dirty
+[submodule "external/xheaders"]
+	path = external/xheaders
+	url = https://github.com/microsoft/DirectX-Headers.git
+	ignore = dirty
+[submodule "external/xtex"]
+	path = external/xtex
+	url = https://github.com/Microsoft/DirectXTex.git
+	ignore = dirty
+[submodule "tools/sharpmake"]
+	path = tools/sharpmake
+	url = https://github.com/ubisoft/Sharpmake.git
+	ignore = dirty
+[submodule "external/simdjson"]
+	path = external/simdjson
+	url = https://github.com/simdjson/simdjson.git
+	ignore = dirty
+[submodule "external/xcompiler"]
+	path = external/xcompiler
+	url = https://github.com/microsoft/DirectXShaderCompiler.git
+	ignore = dirty
+[submodule "external/imgui"]
+	path = external/imgui
+	url = https://github.com/ocornut/imgui.git
+	ignore = dirty
+[submodule "external/im3d"]
+	path = external/im3d
+	url = https://github.com/john-chapman/im3d.git
+[submodule "external/imguizmo"]
+	path = external/imguizmo
+	url = https://github.com/CedricGuillemet/ImGuizmo.git
+[submodule "external/imtextedit"]
+	path = external/imtextedit
+	url = https://github.com/ChemistAion/ImTextEdit.git
+[submodule "external/spvgentwo"]
+	path = external/spvgentwo
+	url = https://github.com/rAzoR8/SpvGenTwo.git
